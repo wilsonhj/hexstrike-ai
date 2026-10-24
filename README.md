@@ -200,6 +200,14 @@ python3 hexstrike_server.py --debug
 python3 hexstrike_server.py --port 8888
 ```
 
+> **Security (HS-1/HS-2):** This server executes arbitrary commands by design, so it must never be reachable by untrusted clients. It binds to `127.0.0.1` by default (`HEXSTRIKE_HOST`). To expose it beyond loopback, set a shared secret on both sides first — the server refuses to start on a non-loopback host without one:
+>
+> ```bash
+> export HEXSTRIKE_API_TOKEN="$(openssl rand -hex 32)"
+> export HEXSTRIKE_HOST=0.0.0.0   # only with the token set
+> python3 hexstrike_server.py     # MCP client (hexstrike_mcp.py) reads the same env var
+> ```
+
 ### Verify Installation
 
 ```bash

@@ -158,6 +158,11 @@ class HexStrikeClient:
         self.server_url = server_url.rstrip("/")
         self.timeout = timeout
         self.session = requests.Session()
+        # Send the shared secret the server requires when HEXSTRIKE_API_TOKEN
+        # is configured on both sides (HS-2).
+        api_token = os.environ.get("HEXSTRIKE_API_TOKEN", "").strip()
+        if api_token:
+            self.session.headers.update({"Authorization": f"Bearer {api_token}"})
 
         # Try to connect to server with retries
         connected = False

@@ -28,6 +28,8 @@ import traceback
 import threading
 import time
 import hashlib
+import hmac
+import ipaddress
 import pickle
 import base64
 import queue
@@ -97,6 +99,32 @@ app.config['JSON_SORT_KEYS'] = False
 # API Configuration
 API_PORT = int(os.environ.get('HEXSTRIKE_PORT', 8888))
 API_HOST = os.environ.get('HEXSTRIKE_HOST', '127.0.0.1')
+# Shared secret required on every route when set (HS-2). The MCP client sends
+# it as `Authorization: Bearer <token>` from the same environment variable.
+API_TOKEN = os.environ.get('HEXSTRIKE_API_TOKEN', '').strip()
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.lower() == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+@app.before_request
+def _require_api_token():
+    """Reject unauthenticated requests when HEXSTRIKE_API_TOKEN is configured."""
+    if not API_TOKEN:
+        return None
+    provided = request.headers.get('X-API-Key', '').strip()
+    auth = request.headers.get('Authorization', '').strip()
+    if not provided and auth.lower().startswith('bearer '):
+        provided = auth[7:].strip()
+    if not provided or not hmac.compare_digest(provided, API_TOKEN):
+        return jsonify({"success": False, "error": "Unauthorized: missing or invalid API token"}), 401
+    return None
 
 # ============================================================================
 # MODERN VISUAL ENGINE (v2.0 ENHANCEMENT)
@@ -8933,10 +8961,22 @@ class FileOperationsManager:
         self.base_dir.mkdir(exist_ok=True)
         self.max_file_size = 100 * 1024 * 1024  # 100MB
 
+    def _resolve_in_base(self, filename: str) -> Path:
+        """Resolve `filename` inside base_dir, rejecting escapes (HS-3).
+
+        Absolute paths and `..` segments that would leave base_dir raise
+        ValueError instead of silently replacing/escaping the base.
+        """
+        base = self.base_dir.resolve()
+        candidate = (base / filename).resolve()
+        if candidate != base and base not in candidate.parents:
+            raise ValueError(f"Path escapes base directory: {filename}")
+        return candidate
+
     def create_file(self, filename: str, content: str, binary: bool = False) -> Dict[str, Any]:
         """Create a file with the specified content"""
         try:
-            file_path = self.base_dir / filename
+            file_path = self._resolve_in_base(filename)
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
             if len(content.encode()) > self.max_file_size:
@@ -8959,7 +8999,7 @@ class FileOperationsManager:
     def modify_file(self, filename: str, content: str, append: bool = False) -> Dict[str, Any]:
         """Modify an existing file"""
         try:
-            file_path = self.base_dir / filename
+            file_path = self._resolve_in_base(filename)
             if not file_path.exists():
                 return {"success": False, "error": "File does not exist"}
 
@@ -8977,7 +9017,9 @@ class FileOperationsManager:
     def delete_file(self, filename: str) -> Dict[str, Any]:
         """Delete a file or directory"""
         try:
-            file_path = self.base_dir / filename
+            file_path = self._resolve_in_base(filename)
+            if file_path == self.base_dir.resolve():
+                return {"success": False, "error": "Refusing to delete the base directory"}
             if not file_path.exists():
                 return {"success": False, "error": "File does not exist"}
 
@@ -8996,7 +9038,7 @@ class FileOperationsManager:
     def list_files(self, directory: str = ".") -> Dict[str, Any]:
         """List files in a directory"""
         try:
-            dir_path = self.base_dir / directory
+            dir_path = self._resolve_in_base(directory)
             if not dir_path.exists():
                 return {"success": False, "error": "Directory does not exist"}
 
@@ -13313,6 +13355,11 @@ class HTTPTestingFramework:
             if headers:
                 send_headers.update(headers)
 
+            # Enforce scope: _apply_match_replace returns the original URL for
+            # out-of-scope targets, so block here instead of sending it (HS-5).
+            if self.scope and not self._in_scope(url):
+                return {'success': False, 'error': f'Out of scope: {url}'}
+
             if method.upper() == 'GET':
                 response = self.session.get(url, params=data, headers=send_headers, timeout=30)
             elif method.upper() == 'POST':
@@ -13378,7 +13425,7 @@ class HTTPTestingFramework:
             h = urlparse(url).hostname or ''
             target = self.scope.get('host','')
             if not h or not target:
-                return True
+                return False  # fail closed when a scope is configured (HS-5)
             if h == target:
                 return True
             if self.scope.get('include_subdomains') and h.endswith('.'+target):
@@ -13671,6 +13718,10 @@ class BrowserAgent:
 
     def navigate_and_inspect(self, url: str, wait_time: int = 5) -> dict:
         """Navigate to URL and perform comprehensive inspection"""
+        # Only web URLs: file://, javascript:, data: etc. would read local
+        # files or execute script in the browser context (HS-4).
+        if urlparse(url).scheme.lower() not in ('http', 'https'):
+            return {'success': False, 'error': f'Unsupported URL scheme: {urlparse(url).scheme or "(none)"}'}
         try:
             if not self.driver:
                 if not self.setup_browser():
@@ -17286,4 +17337,13 @@ if __name__ == "__main__":
         if line.strip():
             logger.info(line)
 
-    app.run(host="0.0.0.0", port=API_PORT, debug=DEBUG_MODE)
+    # Fail closed: exposing this RCE-capable API beyond loopback without a
+    # token is the HS-1/HS-2 vulnerability, so refuse to start in that config.
+    if not _is_loopback_host(API_HOST) and not API_TOKEN:
+        logger.error("Refusing to start: HEXSTRIKE_HOST=%s is not loopback and HEXSTRIKE_API_TOKEN is not set. "
+                     "Set HEXSTRIKE_API_TOKEN (the MCP client sends it automatically) or bind to 127.0.0.1.", API_HOST)
+        sys.exit(1)
+    if not API_TOKEN:
+        logger.warning("HEXSTRIKE_API_TOKEN is not set: API is unauthenticated and must stay on loopback (%s).", API_HOST)
+
+    app.run(host=API_HOST, port=API_PORT, debug=DEBUG_MODE)
