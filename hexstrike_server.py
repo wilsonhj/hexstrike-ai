@@ -13709,6 +13709,11 @@ class BrowserAgent:
 
     def navigate_and_inspect(self, url: str, wait_time: int = 5) -> dict:
         """Navigate to URL and perform comprehensive inspection"""
+        # file://, javascript:, data: and similar schemes would read local files
+        # or run script in the browser, so only web URLs are allowed.
+        scheme = urlparse(url).scheme.lower()
+        if scheme not in ('http', 'https'):
+            return {'success': False, 'error': f'Unsupported URL scheme: {scheme or "(none)"}'}
         try:
             if not self.driver:
                 if not self.setup_browser():
