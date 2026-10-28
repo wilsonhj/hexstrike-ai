@@ -21,7 +21,7 @@ Get the branch:
 
 ```bash
 git clone https://github.com/0x4m4/hexstrike-ai && cd hexstrike-ai
-git fetch origin pull/<PR_NUMBER>/head:security-hardening
+git fetch origin pull/292/head:security-hardening
 git checkout security-hardening
 ```
 
